@@ -1,0 +1,282 @@
+-- Figgyhub — Auto Farm animal
+-- Roblox executor build
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui           = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+local char   = player.Character or player.CharacterAdded:Wait()
+local hrp    = char:WaitForChild("HumanoidRootPart")
+
+local settings = {
+    autoThrow    = false,
+    autoCollect  = false,
+    autoRebirth  = false,
+    farmDelay    = 0.25,
+    rebirthAt    = 1000,
+    moveSpeed    = 40,
+    walkRadius   = 60,
+}
+
+local function bindCharacter(c)
+    hrp = c:WaitForChild("HumanoidRootPart")
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = settings.moveSpeed end
+end
+player.CharacterAdded:Connect(bindCharacter)
+
+local remoteCache = { throwFood = nil, rebirth = nil, collect = nil }
+local function scoreRemoteName(name)
+    name = name:lower()
+    if name:find("throwfood") or (name:find("throw") and name:find("food")) then return "throwFood", 100 end
+    if name:find("feed") or name:find("throwitem") then return "throwFood", 80 end
+    if name:find("rebirth") then return "rebirth", 100 end
+    if name:find("collect") or name:find("pickup") then return "collect", 80 end
+    return nil, 0
+end
+local function rebuildRemoteCache()
+    local best = { throwFood = 0, rebirth = 0, collect = 0 }
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            local slot, weight = scoreRemoteName(obj.Name)
+            if slot and weight > best[slot] then best[slot] = weight; remoteCache[slot] = obj end
+        end
+    end
+end
+rebuildRemoteCache()
+task.delay(3, rebuildRemoteCache)
+task.delay(8, rebuildRemoteCache)
+
+local ANIMAL_KEYWORDS = {"animal","chicken","cat","dog","cow","sheep","rabbit","pig","duck","horse","goat","bird","pet","monster","mob"}
+local animalCache, lastAnimalScan = {}, 0
+local function looksLikeAnimal(m)
+    local n = m.Name:lower()
+    for _, kw in ipairs(ANIMAL_KEYWORDS) do if n:find(kw, 1, true) then return true end end
+    return false
+end
+local function refreshAnimals()
+    if tick() - lastAnimalScan < 1.5 then return animalCache end
+    lastAnimalScan = tick()
+    local list = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and looksLikeAnimal(obj) then
+            local h = obj.PrimaryPart or obj:FindFirstChild("HumanoidRootPart")
+            if h and (h.Position - hrp.Position).Magnitude < 500 then table.insert(list, h) end
+        end
+    end
+    animalCache = list
+    return list
+end
+
+local function detectAntiCheat()
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("LocalScript") or obj:IsA("Script") then
+            local n = obj.Name:lower()
+            if n:find("anticheat") or n:find("acclient") then return true end
+        end
+    end
+    return false
+end
+local HAS_AC = detectAntiCheat()
+local function moveTo(pos)
+    if not hrp or not hrp.Parent then return end
+    if HAS_AC then
+        local d = pos - hrp.Position
+        if d.Magnitude > 1 then hrp.AssemblyLinearVelocity = d.Unit * math.min(d.Magnitude * 4, 200) end
+    else
+        hrp.CFrame = CFrame.new(pos)
+    end
+end
+
+local function throwFoodAt(pos)
+    local re = remoteCache.throwFood
+    if not re then return end
+    if re:IsA("RemoteEvent") then re:FireServer(pos) else pcall(function() re:InvokeServer(pos) end) end
+end
+
+local COLLECT_KEYWORDS = {"reward","coin","point","collect","drop","gem","cash","money","food","apple","carrot"}
+local function isCollectible(p)
+    local n = p.Name:lower()
+    for _, kw in ipairs(COLLECT_KEYWORDS) do if n:find(kw, 1, true) then return true end end
+    return false
+end
+local function collectNearby()
+    if not hrp or not hrp.Parent then return end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and isCollectible(obj) then
+            if (hrp.Position - obj.Position).Magnitude < 80 then
+                moveTo(obj.Position + Vector3.new(0, 3, 0))
+                task.wait(0.05)
+            end
+        end
+    end
+    if remoteCache.collect then pcall(function() remoteCache.collect:FireServer() end) end
+end
+
+local function tryRebirth()
+    if remoteCache.rebirth then
+        pcall(function() remoteCache.rebirth:FireServer() end)
+        return true
+    end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local n = (obj.Parent.Name .. " " .. (obj.ActionText or "")):lower()
+            if n:find("rebirth") or n:find("prestige") then
+                if fireproximityprompt then pcall(fireproximityprompt, obj) end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function getScore()
+    local ls = player:FindFirstChild("leaderstats")
+    if not ls then return 0 end
+    for _, v in ipairs(ls:GetChildren()) do
+        if v:IsA("IntValue") or v:IsA("NumberValue") then
+            local n = v.Name:lower()
+            if n:find("point") or n:find("score") or n:find("cash") or n:find("coin") then return v.Value end
+        end
+    end
+    return 0
+end
+
+local existing = CoreGui:FindFirstChild("AutoFarmGUI")
+if existing then existing:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AutoFarmGUI"
+gui.ResetOnSpawn = false
+gui.Parent = CoreGui
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 220, 0, 320)
+main.Position = UDim2.new(0, 10, 0.3, 0)
+main.BackgroundColor3 = Color3.fromRGB(18, 18, 28)
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 40)
+titleBar.BackgroundColor3 = Color3.fromRGB(255, 80, 50)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 12)
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Size = UDim2.new(1, 0, 1, 0)
+titleLbl.BackgroundTransparency = 1
+titleLbl.Text = "🐾 Auto Farm"
+titleLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLbl.TextScaled = true
+titleLbl.Font = Enum.Font.GothamBold
+titleLbl.Parent = titleBar
+
+local scoreLbl = Instance.new("TextLabel")
+scoreLbl.Size = UDim2.new(1, -20, 0, 30)
+scoreLbl.Position = UDim2.new(0, 10, 0, 48)
+scoreLbl.BackgroundTransparency = 1
+scoreLbl.Text = "🌟 Score: 0"
+scoreLbl.TextColor3 = Color3.fromRGB(255, 220, 80)
+scoreLbl.TextScaled = true
+scoreLbl.Font = Enum.Font.GothamBold
+scoreLbl.Parent = main
+
+local btnY = 85
+local function makeToggle(label, key)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -20, 0, 38)
+    btn.Position = UDim2.new(0, 10, 0, btnY)
+    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    btn.Text = "❌ " .. label .. ": OFF"
+    btn.TextColor3 = Color3.fromRGB(220, 220, 255)
+    btn.TextScaled = true
+    btn.Font = Enum.Font.GothamBold
+    btn.BorderSizePixel = 0
+    btn.Parent = main
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    btnY = btnY + 44
+    btn.MouseButton1Click:Connect(function()
+        settings[key] = not settings[key]
+        btn.BackgroundColor3 = settings[key] and Color3.fromRGB(0, 180, 90) or Color3.fromRGB(50, 50, 70)
+        btn.Text = (settings[key] and "✅ " or "❌ ") .. label .. (settings[key] and ": ON" or ": OFF")
+    end)
+end
+makeToggle("Auto Throw", "autoThrow")
+makeToggle("Auto Collect", "autoCollect")
+makeToggle("Auto Rebirth", "autoRebirth")
+
+local rebirthLbl = Instance.new("TextLabel")
+rebirthLbl.Size = UDim2.new(1, -20, 0, 20)
+rebirthLbl.Position = UDim2.new(0, 10, 0, btnY)
+rebirthLbl.BackgroundTransparency = 1
+rebirthLbl.Text = "Rebirth di score:"
+rebirthLbl.TextColor3 = Color3.fromRGB(180, 180, 220)
+rebirthLbl.TextScaled = true
+rebirthLbl.Font = Enum.Font.Gotham
+rebirthLbl.Parent = main
+btnY = btnY + 22
+
+local rebirthBox = Instance.new("TextBox")
+rebirthBox.Size = UDim2.new(1, -20, 0, 32)
+rebirthBox.Position = UDim2.new(0, 10, 0, btnY)
+rebirthBox.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+rebirthBox.Text = "1000"
+rebirthBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+rebirthBox.TextScaled = true
+rebirthBox.Font = Enum.Font.Gotham
+rebirthBox.BorderSizePixel = 0
+rebirthBox.Parent = main
+Instance.new("UICorner", rebirthBox).CornerRadius = UDim.new(0, 8)
+rebirthBox.FocusLost:Connect(function()
+    local v = tonumber(rebirthBox.Text)
+    if v and v > 0 then settings.rebirthAt = v end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(settings.farmDelay)
+        if hrp and hrp.Parent then
+            if settings.autoThrow then
+                local animals = refreshAnimals()
+                if #animals == 0 then
+                    local o = Vector3.new(math.random(-settings.walkRadius, settings.walkRadius), 0,
+                                          math.random(-settings.walkRadius, settings.walkRadius))
+                    moveTo(hrp.Position + o)
+                else
+                    for _, a in ipairs(animals) do
+                        if not hrp.Parent then break end
+                        moveTo(a.Position + Vector3.new(0, 3, 0))
+                        throwFoodAt(a.Position)
+                        task.wait(0.05)
+                    end
+                end
+            end
+            if settings.autoCollect then collectNearby() end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if settings.autoRebirth and getScore() >= settings.rebirthAt then
+            tryRebirth()
+            task.wait(1)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        scoreLbl.Text = "🌟 Score: " .. getScore()
+    end
+end)
+
+print("[Figgyhub] loaded — AC: " .. tostring(HAS_AC))
